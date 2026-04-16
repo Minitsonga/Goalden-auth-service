@@ -1,3 +1,7 @@
+import dotenv from "dotenv";
+
+dotenv.config();
+
 /**
  * Configuration centralisée - variables d'environnement
  */
@@ -19,7 +23,7 @@ export const config = {
   port: parseInt(process.env.PORT ?? "3001", 10),
 
   mongodb: {
-    uri: process.env.MONGO_URI ?? "mongodb://localhost:27017/goalden_auth",
+    uri: process.env.MONGO_URI ?? "",
   },
 
   jwt: {
