@@ -1,11 +1,14 @@
 import bcrypt from "bcrypt";
 import crypto from "crypto";
+import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 import { AppError } from "../middleware/errorHandler.js";
 import { UserRepository } from "../repositories/userRepository.js";
 import { RefreshTokenRepository } from "../repositories/refreshTokenRepository.js";
 import { TokenService } from "./tokenService.js";
 import { PasswordResetTokenModel } from "../models/PasswordResetToken.js";
 import type { IUser } from "../models/User.js";
+import { config } from "../config/index.js";
 
 const SALT_ROUNDS = 12;
 
@@ -35,6 +38,26 @@ export class AuthService {
     return { user, accessToken, refreshToken };
   }
 
+  async registerWithInvitation(
+    email: string,
+    password: string,
+    displayName: string,
+    invitationCode: string,
+  ): Promise<{ user: IUser; accessToken: string; refreshToken: string }> {
+    const result = await this.register(email, password, displayName);
+    try {
+      await this.consumeTeamInvitation({
+        code: invitationCode,
+        userId: String(result.user._id),
+        userEmail: result.user.email,
+      });
+    } catch (err) {
+      await this.userRepository.deleteById(String(result.user._id));
+      throw err;
+    }
+    return result;
+  }
+
   async login(
     email: string,
     password: string,
@@ -61,30 +84,22 @@ export class AuthService {
 
   async refresh(
     refreshTokenValue: string,
-  ): Promise<{ accessToken: string; refreshToken: string }> {
-    const stored = await this.refreshTokenRepository.findByToken(refreshTokenValue);
+  ): Promise<{ user: IUser; accessToken: string; refreshToken: string }> {
+    const now = new Date();
+    const stored = await this.refreshTokenRepository.consumeValidToken(refreshTokenValue, now);
     if (!stored) {
       throw new AppError(401, "UNAUTHORIZED", "Invalid refresh token");
     }
 
-    if (stored.expiresAt < new Date()) {
-      await this.refreshTokenRepository.deleteByToken(refreshTokenValue);
-      throw new AppError(401, "UNAUTHORIZED", "Refresh token expired");
-    }
-
     const user = await this.userRepository.findById(String(stored.userId));
     if (!user || !user.isActive) {
-      await this.refreshTokenRepository.deleteByToken(refreshTokenValue);
       throw new AppError(401, "UNAUTHORIZED", "User not found or deactivated");
     }
-
-    // Rotation : supprimer l'ancien, créer un nouveau
-    await this.refreshTokenRepository.deleteByToken(refreshTokenValue);
 
     const accessToken = this.tokenService.generateAccessToken(user);
     const newRefreshToken = await this.createRefreshToken(String(user._id));
 
-    return { accessToken, refreshToken: newRefreshToken };
+    return { user, accessToken, refreshToken: newRefreshToken };
   }
 
   async logout(userId: string): Promise<void> {
@@ -140,6 +155,38 @@ export class AuthService {
     return user;
   }
 
+  async updateMyProfile(
+    userId: string,
+    patch: { displayName?: string; avatarFileId?: string | null },
+    isSuperAdmin: boolean,
+  ): Promise<IUser> {
+    await this.assertUserMayEditProfile(userId, isSuperAdmin);
+
+    if (patch.avatarFileId != null && patch.avatarFileId !== "") {
+      const ok = mongoose.Types.ObjectId.isValid(patch.avatarFileId);
+      if (!ok) {
+        throw new AppError(400, "VALIDATION_ERROR", "avatarFileId must be a valid ObjectId");
+      }
+    }
+
+    const updated = await this.userRepository.updateProfile(userId, patch);
+    if (!updated) {
+      throw new AppError(404, "NOT_FOUND", "User not found");
+    }
+    return updated;
+  }
+
+  async updateUserRole(
+    targetUserId: string,
+    globalRole: "USER" | "COACH" | "ADMIN",
+  ): Promise<IUser> {
+    const updated = await this.userRepository.updateGlobalRole(targetUserId, globalRole);
+    if (!updated) {
+      throw new AppError(404, "NOT_FOUND", "User not found");
+    }
+    return updated;
+  }
+
   private async createRefreshToken(userId: string): Promise<string> {
     const token = crypto.randomBytes(64).toString("hex");
     const expiresAt = new Date(Date.now() + this.parseExpiry());
@@ -159,6 +206,87 @@ export class AuthService {
       case "m": return value * 60 * 1000;
       case "s": return value * 1000;
       default: return 7 * 24 * 60 * 60 * 1000;
+    }
+  }
+
+  private async assertUserMayEditProfile(userId: string, isSuperAdmin: boolean): Promise<void> {
+    if (isSuperAdmin) {
+      return;
+    }
+    if (!config.jwt.serviceSecret) {
+      throw new AppError(503, "SERVICE_UNAVAILABLE", "Service JWT not configured");
+    }
+    const teamServiceUrl = process.env.TEAM_SERVICE_URL ?? "http://localhost:3002";
+    const serviceToken = jwt.sign(
+      { serviceId: "auth-service", scope: "internal", permissions: [] },
+      config.jwt.serviceSecret,
+      { expiresIn: "10m" },
+    );
+    const url = `${teamServiceUrl}/internal/users/${encodeURIComponent(userId)}/profile-eligibility`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${serviceToken}` },
+      });
+    } catch {
+      throw new AppError(503, "SERVICE_UNAVAILABLE", "Unable to reach team-service");
+    }
+    const body: unknown = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new AppError(
+        503,
+        "SERVICE_UNAVAILABLE",
+        typeof body === "object" && body !== null && "error" in body
+          ? String((body as { error?: { message?: string } }).error?.message ?? "Membership check failed")
+          : "Membership check failed",
+      );
+    }
+    const hasMembership =
+      typeof body === "object" &&
+      body !== null &&
+      "data" in body &&
+      typeof (body as { data?: { hasMembership?: boolean } }).data?.hasMembership === "boolean"
+        ? Boolean((body as { data: { hasMembership: boolean } }).data.hasMembership)
+        : false;
+    if (!hasMembership) {
+      throw new AppError(
+        403,
+        "FORBIDDEN",
+        "An active club, section or team membership is required to update your profile",
+      );
+    }
+  }
+
+  private async consumeTeamInvitation(params: {
+    code: string;
+    userId: string;
+    userEmail: string;
+  }): Promise<void> {
+    if (!config.jwt.serviceSecret) {
+      throw new AppError(503, "SERVICE_UNAVAILABLE", "Service JWT secret not configured");
+    }
+    const teamServiceUrl = process.env.TEAM_SERVICE_URL ?? "http://localhost:3002";
+    const serviceToken = jwt.sign(
+      { serviceId: "auth-service", scope: "internal", permissions: [] },
+      config.jwt.serviceSecret,
+      { expiresIn: "10m" },
+    );
+    const response = await fetch(`${teamServiceUrl}/internal/invitations/consume`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${serviceToken}`,
+      },
+      body: JSON.stringify(params),
+    });
+    const body: any = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new AppError(
+        response.status === 403 ? 403 : 400,
+        body?.error?.code ?? "INVITATION_CONSUME_FAILED",
+        body?.error?.message ?? "Unable to consume invitation",
+      );
     }
   }
 }

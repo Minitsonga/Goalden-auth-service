@@ -6,7 +6,7 @@ import { AppError } from "./errorHandler.js";
 declare global {
   namespace Express {
     interface Request {
-      user?: { id: string; email: string };
+      user?: { id: string; email: string; globalRole: "USER" | "COACH" | "ADMIN"; isSuperAdmin: boolean };
     }
   }
 }
@@ -33,15 +33,31 @@ export function userAuth(req: Request, _res: Response, next: NextFunction): void
       userId?: string;
       email?: string;
       sub?: string;
+      globalRole?: "USER" | "COACH" | "ADMIN";
+      isSuperAdmin?: boolean;
     };
     const userId = decoded.userId ?? decoded.sub;
     if (!userId) {
       next(new AppError(401, "UNAUTHORIZED", "Invalid token payload"));
       return;
     }
-    req.user = { id: userId, email: decoded.email ?? "" };
+    const globalRole = decoded.globalRole ?? "USER";
+    req.user = {
+      id: userId,
+      email: decoded.email ?? "",
+      globalRole,
+      isSuperAdmin: Boolean(decoded.isSuperAdmin),
+    };
     next();
   } catch {
     next(new AppError(401, "UNAUTHORIZED", "Invalid or expired token"));
   }
+}
+
+export function requireAdmin(req: Request, _res: Response, next: NextFunction): void {
+  if (!req.user || (req.user.globalRole !== "ADMIN" && !req.user.isSuperAdmin)) {
+    next(new AppError(403, "FORBIDDEN", "Admin role required"));
+    return;
+  }
+  next();
 }

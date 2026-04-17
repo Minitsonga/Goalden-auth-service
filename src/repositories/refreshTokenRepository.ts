@@ -14,6 +14,13 @@ export class RefreshTokenRepository {
     return RefreshTokenModel.findOne({ token }).exec();
   }
 
+  async consumeValidToken(token: string, now: Date): Promise<IRefreshToken | null> {
+    return RefreshTokenModel.findOneAndDelete({
+      token,
+      expiresAt: { $gt: now },
+    }).exec();
+  }
+
   async deleteByToken(token: string): Promise<void> {
     await RefreshTokenModel.deleteOne({ token }).exec();
   }

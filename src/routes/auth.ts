@@ -4,6 +4,7 @@ import { userAuth } from "../middleware/userAuth.js";
 import { validateBody } from "../middleware/validate.js";
 import {
   registerSchema,
+  registerWithInvitationSchema,
   loginSchema,
   refreshSchema,
   requestPasswordResetSchema,
@@ -15,12 +16,31 @@ const authService = new AuthService();
 
 router.post("/register", validateBody(registerSchema), async (req, res, next) => {
   try {
-    const { email, password, displayName } = req.body as {
+    res.status(400).json({
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "Use /api/auth/register-with-invitation: a club assignment is required at account creation.",
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/register-with-invitation", validateBody(registerWithInvitationSchema), async (req, res, next) => {
+  try {
+    const { email, password, displayName, invitationCode } = req.body as {
       email: string;
       password: string;
       displayName: string;
+      invitationCode: string;
     };
-    const result = await authService.register(email, password, displayName);
+    const result = await authService.registerWithInvitation(
+      email,
+      password,
+      displayName,
+      invitationCode,
+    );
     res.status(201).json({
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
@@ -28,6 +48,9 @@ router.post("/register", validateBody(registerSchema), async (req, res, next) =>
         id: String(result.user._id),
         email: result.user.email,
         displayName: result.user.displayName,
+        globalRole: result.user.globalRole,
+        isSuperAdmin: Boolean(result.user.isSuperAdmin),
+        avatarFileId: result.user.avatarFileId ?? null,
       },
     });
   } catch (err) {
@@ -46,6 +69,9 @@ router.post("/login", validateBody(loginSchema), async (req, res, next) => {
         id: String(result.user._id),
         email: result.user.email,
         displayName: result.user.displayName,
+        globalRole: result.user.globalRole,
+        isSuperAdmin: Boolean(result.user.isSuperAdmin),
+        avatarFileId: result.user.avatarFileId ?? null,
       },
     });
   } catch (err) {
@@ -60,6 +86,14 @@ router.post("/refresh", validateBody(refreshSchema), async (req, res, next) => {
     res.json({
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
+      user: {
+        id: String(result.user._id),
+        email: result.user.email,
+        displayName: result.user.displayName,
+        globalRole: result.user.globalRole,
+        isSuperAdmin: Boolean(result.user.isSuperAdmin),
+        avatarFileId: result.user.avatarFileId ?? null,
+      },
     });
   } catch (err) {
     next(err);

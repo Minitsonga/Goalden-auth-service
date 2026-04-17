@@ -10,7 +10,13 @@ export class TokenService {
       throw new AppError(503, "SERVICE_UNAVAILABLE", "JWT secret not configured");
     }
     return jwt.sign(
-      { userId: String(user._id), email: user.email },
+      {
+        sub: String(user._id),
+        userId: String(user._id),
+        email: user.email,
+        globalRole: user.globalRole ?? "USER",
+        isSuperAdmin: Boolean(user.isSuperAdmin),
+      },
       config.jwt.userSecret,
       { expiresIn: config.jwt.userExpiresIn } as jwt.SignOptions,
     );

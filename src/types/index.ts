@@ -1,6 +1,7 @@
 export interface UserPayload {
   userId: string;
   email: string;
+  globalRole: "USER" | "COACH" | "ADMIN";
 }
 
 export interface ServicePayload {
